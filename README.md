@@ -1,4 +1,4 @@
-# @tokiori/cc-timeline
+# tokiori-cc
 
 Reflect your **Claude Code** work sessions into your [tokiori](https://tokiori-app.com) timeline — automatically, with category detection.
 
@@ -30,7 +30,7 @@ The exact payload is built in [`src/hook.js`](src/hook.js) (`postManualUpdate`) 
 ## Install
 
 ```bash
-npm install -g @tokiori/cc-timeline
+npm install -g tokiori-cc
 tokiori-cc init     # registers the integration with Claude Code (once)
 tokiori-cc login    # sign in with Google in your browser
 ```

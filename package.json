@@ -1,5 +1,5 @@
 {
-  "name": "@tokiori/cc-timeline",
+  "name": "tokiori-cc",
   "version": "0.1.0",
   "description": "Reflect your Claude Code work sessions into the tokiori timeline, with automatic category detection. Sends only category, title and timestamps — never your code.",
   "type": "commonjs",
@@ -32,8 +32,5 @@
     "url": "https://github.com/adachic/tokiori-cc/issues"
   },
   "author": "Norio Studio",
-  "license": "MIT",
-  "publishConfig": {
-    "access": "public"
-  }
+  "license": "MIT"
 }
