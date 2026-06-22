@@ -1,0 +1,39 @@
+{
+  "name": "@tokiori/cc-timeline",
+  "version": "0.1.0",
+  "description": "Reflect your Claude Code work sessions into the tokiori timeline, with automatic category detection. Sends only category, title and timestamps — never your code.",
+  "type": "commonjs",
+  "bin": {
+    "tokiori-cc": "bin/tokiori-cc.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "tokiori",
+    "claude-code",
+    "time-tracking",
+    "timeline",
+    "hook",
+    "mcp"
+  ],
+  "homepage": "https://github.com/adachic/tokiori-cc#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/adachic/tokiori-cc.git"
+  },
+  "bugs": {
+    "url": "https://github.com/adachic/tokiori-cc/issues"
+  },
+  "author": "Norio Studio",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}
