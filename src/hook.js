@@ -6,7 +6,7 @@ const config = require('./config');
 const auth = require('./auth');
 const client = require('./client');
 const pending = require('./pending');
-const { ulid, startOffset, firstUserTimestampMs, firstUserText, gitRoot } = require('./util');
+const { ulid, startOffset, firstUserTimestampMs, firstUserText, gitRoot, localDayStartMs, dayKey } = require('./util');
 const { classify } = require('./categorize');
 
 function readStdin() {
@@ -56,26 +56,37 @@ async function run(opts) {
     const transcriptPath = evt.transcript_path || evt.transcriptPath || null;
     const now = Date.now();
 
-    // セッション単位 upsert：初回は作成、以降は同 sessionId を伸ばす。
-    // カテゴリ/タイトルはセッションごとに一度だけ判定し state に固定（LLM の再呼び出しを避ける）。
+    // ブロック分割: 日付が変わった or 一定時間アイドルが空いたら新ブロックにする。
+    // これにより各ブロックは1日内に収まり、夜間などの長時間アイドルも繰り越さない。
+    const gapMs = (cfg.gapMinutes > 0 ? cfg.gapMinutes : 0) * 60 * 1000;
+    const todayKey = dayKey(now);
     let st = loadState(claudeSessionId);
-    if (!st || !st.categoryPath) {
-      const baseStartMs = (st && st.startMs) || (transcriptPath && firstUserTimestampMs(transcriptPath)) || now;
-      const sessionId = (st && st.sessionId) || ulid(baseStartMs);
-      // 同一ミリ秒開始の衝突回避（既存 state の startMs はそのまま尊重）。
-      const startMs = (st && st.startMs) ? st.startMs : baseStartMs + startOffset(sessionId);
-      const ctx = { cwd, firstUserText: transcriptPath ? firstUserText(transcriptPath) : '' };
+    const dayChanged = st && st.day && st.day !== todayKey;
+    const gapExceeded = st && gapMs > 0 && st.lastSeenMs && (now - st.lastSeenMs) > gapMs;
+
+    if (!st || !st.categoryPath || !st.day || dayChanged || gapExceeded) {
+      // 新ブロックの開始 = 「本日0:00」かつ「前回終了後」以降の最初の発話（無ければ now）。
+      const sinceMs = Math.max(localDayStartMs(now), (st && st.lastSeenMs) ? st.lastSeenMs + 1 : 0);
+      let blockStart = (transcriptPath && firstUserTimestampMs(transcriptPath, sinceMs));
+      if (!Number.isFinite(blockStart) || blockStart < sinceMs || blockStart > now) blockStart = now;
+      const sessionId = ulid(blockStart);
+      const startMs = blockStart + startOffset(sessionId);
+      const ctx = { cwd, firstUserText: transcriptPath ? firstUserText(transcriptPath, sinceMs) : '' };
       const decided = await classify(ctx, cfg);
       st = {
+        day: todayKey,
         sessionId,
         startMs,
+        lastSeenMs: now,
         claudeSessionId,
         cwd,
         categoryPath: decided.categoryPath,
         title: decided.title,
       };
-      saveState(claudeSessionId, st);
+    } else {
+      st.lastSeenMs = now;
     }
+    saveState(claudeSessionId, st);
 
     const categoryPath = st.categoryPath;
     const title = st.title;
@@ -88,7 +99,7 @@ async function run(opts) {
 
     const payload = {
       newStartMs: st.startMs,
-      newEndMs: now,
+      newEndMs: Math.max(now, st.startMs + 1000),
       title,
       categoryPath,
       sessionId: st.sessionId,

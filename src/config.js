@@ -55,6 +55,8 @@ function rawDefaults() {
     enabled: true,
     autoUpdate: false,
     minSeconds: 0,
+    // 日跨ぎ/長時間アイドルで新ブロックに分割する閾値（分）。0 で無効。
+    gapMinutes: 30,
     env: DEFAULT_ENV,
     accounts: {},              // { dev:{userId,refreshToken}, prod:{...} }
     categories: [],
@@ -100,6 +102,7 @@ function save(cfg) {
     enabled: cfg.enabled,
     autoUpdate: cfg.autoUpdate,
     minSeconds: cfg.minSeconds,
+    gapMinutes: cfg.gapMinutes != null ? cfg.gapMinutes : 30,
     env: cfg.env,
     accounts: cfg.accounts || {},
     categories: cfg.categories || [],

@@ -54,29 +54,37 @@ function decodeJwt(token) {
   }
 }
 
-// Claude Code の transcript(JSONL) から最初のユーザー発話時刻(ms)を拾う。
-// 取れなければ null。セッション開始時刻の推定に使う。
-function firstUserTimestampMs(transcriptPath) {
+// ローカル時刻でその ms の属する日の 0:00 の ms。
+function localDayStartMs(ms) {
+  const d = new Date(ms);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+// ローカル時刻の YYYY-MM-DD。
+function dayKey(ms) {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// transcript から sinceMs 以降で最初のメッセージ時刻(ms)。取れなければ null。
+// sinceMs 省略時はセッション最初の時刻。
+function firstUserTimestampMs(transcriptPath, sinceMs) {
+  const since = Number.isFinite(sinceMs) ? sinceMs : -Infinity;
   try {
     const raw = fs.readFileSync(transcriptPath, 'utf8');
-    const lines = raw.split('\n');
-    for (const line of lines) {
+    for (const line of raw.split('\n')) {
       if (!line.trim()) continue;
       let obj;
-      try {
-        obj = JSON.parse(line);
-      } catch (_) {
-        continue;
-      }
+      try { obj = JSON.parse(line); } catch (_) { continue; }
       const ts = obj && obj.timestamp;
       if (typeof ts === 'string') {
         const ms = Date.parse(ts);
-        if (Number.isFinite(ms)) return ms;
+        if (Number.isFinite(ms) && ms >= since) return ms;
       }
     }
-  } catch (_) {
-    /* transcript 読めなければ null */
-  }
+  } catch (_) { /* transcript 読めなければ null */ }
   return null;
 }
 
@@ -120,8 +128,25 @@ function gitRoot(cwd) {
   return null;
 }
 
-// transcript の最初のユーザー発話テキストを取り出す（LLM 分類のヒント用）。
-function firstUserText(transcriptPath) {
+// スラッシュコマンド等の制御テキストを人間可読に整える。
+// 例: "<command-name>/pr</command-name><command-message>pr-review</command-message>..." → "/pr"
+function cleanUserText(s) {
+  let t = String(s || '');
+  const nameM = /<command-name>\s*([^<]+?)\s*<\/command-name>/i.exec(t);
+  if (nameM) {
+    let name = nameM[1].trim();
+    if (!name.startsWith('/')) name = '/' + name.replace(/^\/+/, '');
+    return name;
+  }
+  // 各種タグ/ラッパを除去
+  t = t.replace(/<command-[a-z-]+>/gi, ' ').replace(/<\/command-[a-z-]+>/gi, ' ');
+  t = t.replace(/<[^>]+>/g, ' ');
+  return t.replace(/\s+/g, ' ').trim();
+}
+
+// transcript から sinceMs 以降の最初のユーザー発話テキスト（整形済み・分類/タイトル用）。
+function firstUserText(transcriptPath, sinceMs) {
+  const since = Number.isFinite(sinceMs) ? sinceMs : -Infinity;
   try {
     const raw = fs.readFileSync(transcriptPath, 'utf8');
     for (const line of raw.split('\n')) {
@@ -129,15 +154,20 @@ function firstUserText(transcriptPath) {
       let obj;
       try { obj = JSON.parse(line); } catch (_) { continue; }
       if (!obj || obj.type !== 'user') continue;
+      const ms = obj.timestamp ? Date.parse(obj.timestamp) : NaN;
+      if (Number.isFinite(ms) && ms < since) continue;
       const c = obj.message && obj.message.content;
-      if (typeof c === 'string') return c;
-      if (Array.isArray(c)) {
+      let text = '';
+      if (typeof c === 'string') text = c;
+      else if (Array.isArray(c)) {
         const t = c.find((x) => x && x.type === 'text');
-        if (t && typeof t.text === 'string') return t.text;
+        if (t && typeof t.text === 'string') text = t.text;
       }
+      const cleaned = cleanUserText(text);
+      if (cleaned) return cleaned;
     }
   } catch (_) { /* noop */ }
   return '';
 }
 
-module.exports = { ulid, startOffset, decodeJwt, firstUserTimestampMs, hasMutatingToolUse, firstUserText, gitRoot };
+module.exports = { ulid, startOffset, decodeJwt, firstUserTimestampMs, hasMutatingToolUse, firstUserText, cleanUserText, gitRoot, localDayStartMs, dayKey };
