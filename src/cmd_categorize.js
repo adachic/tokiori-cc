@@ -19,36 +19,67 @@ function fmtDur(sec) {
   return m >= 60 ? `${Math.floor(m / 60)}h${m % 60}m` : `${m}m`;
 }
 
+// "Claude Code: <repo>: <work>" / "Claude Code: <repo>" → repo
+function repoFromTitle(title) {
+  const m = /^Claude Code:\s*([^:]+?)(?::|$)/.exec(title || '');
+  return m ? m[1].trim() : null;
+}
+
 // dir に一致する state ファイルの categoryPath を更新（進行中セッションを次回 Stop で反映）。
-function patchStates(dir, categoryPath) {
+function patchStates(repo, categoryPath) {
   let dirents = [];
   try { dirents = fs.readdirSync(config.STATE_DIR); } catch (_) { return; }
   for (const f of dirents) {
     const p = path.join(config.STATE_DIR, f);
     let st;
     try { st = JSON.parse(fs.readFileSync(p, 'utf8')); } catch (_) { continue; }
-    const root = gitRoot(st.cwd) || st.cwd;
-    if (path.basename(root || '') === dir) {
+    const root = gitRoot(st.cwd) || st.cwd || '';
+    if (path.basename(root) === repo) {
       st.categoryPath = categoryPath;
       try { fs.writeFileSync(p, JSON.stringify(st) + '\n'); } catch (_) { /* noop */ }
     }
   }
 }
 
+// タイムライン上の既存 uncat + 保留中をリポジトリ単位に集約。
+async function collectGroups(cfg) {
+  const fallback = cfg.fallbackCategory || '(uncat)';
+  const groups = new Map(); // repo -> { repo, entries: Map(sessionId->{sessionId,startMs,endMs,title}) }
+  const add = (repo, e) => {
+    if (!repo || !e.sessionId) return;
+    if (!groups.has(repo)) groups.set(repo, { repo, entries: new Map() });
+    groups.get(repo).entries.set(e.sessionId, e);
+  };
+
+  // 1) タイムラインの既存 uncat（claude-code 由来）
+  const days = cfg.categorizeDays || 60;
+  const sinceMs = Date.now() - days * 24 * 3600 * 1000;
+  let rows = [];
+  try { rows = await client.listManualLogs(cfg, sinceMs); } catch (e) { /* オフライン等は pending のみ */ }
+  for (const r of rows) {
+    if (r.categoryPath !== fallback) continue;
+    if (!(r.title || '').startsWith('Claude Code:')) continue; // 自分の手動データは触らない
+    const repo = repoFromTitle(r.title) || '(不明)';
+    add(repo, { sessionId: r.sessionId, startMs: r.startMs, endMs: r.endMs, title: r.title });
+  }
+
+  // 2) 保留キュー（投稿失敗分なども拾う）
+  const p = pending.load();
+  for (const d of Object.values(p.dirs || {})) {
+    for (const s of Object.values(d.sessions || {})) {
+      add(d.dir, { sessionId: s.sessionId, startMs: s.startMs, endMs: s.endMs, title: s.title });
+    }
+  }
+  return [...groups.values()].map((g) => ({ repo: g.repo, entries: [...g.entries.values()] }));
+}
+
 async function run() {
   const cfg = config.load();
-  const p = pending.load();
-  const dirs = Object.values(p.dirs || {});
-  if (!dirs.length) {
-    process.stderr.write('保留中の未分類セッションはありません。\n');
-    return 0;
-  }
   if (!cfg.userId) {
     process.stderr.write('未ログインです。`tokiori-cc login` を実行してください。\n');
     return 1;
   }
 
-  // カテゴリ候補（無ければ同期）。
   let opts = optionPaths(cfg.categories || []);
   if (!opts.length) {
     try { await categories.sync(cfg); } catch (_) { /* noop */ }
@@ -59,16 +90,22 @@ async function run() {
     return 1;
   }
 
+  const groups = await collectGroups(cfg);
+  if (!groups.length) {
+    process.stderr.write('未分類（uncat）のエントリはありません。\n');
+    return 0;
+  }
+  groups.sort((a, b) => b.entries.length - a.entries.length);
+
   const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
-  process.stderr.write(`未分類のリポジトリ ${dirs.length} 件。番号でカテゴリ指定 / s=スキップ / q=終了\n\n`);
+  process.stderr.write(`未分類リポジトリ ${groups.length} 件。番号でカテゴリ指定 / s=スキップ / q=終了\n\n`);
 
   try {
-    for (const d of dirs) {
-      const sessions = Object.values(d.sessions || {});
-      const totalSec = sessions.reduce((a, s) => a + Math.max(0, (s.endMs - s.startMs) / 1000), 0);
-      process.stderr.write(`■ ${d.dir}  (${sessions.length}セッション / 計${fmtDur(totalSec)})\n`);
-      process.stderr.write(`  cwd: ${d.cwd}\n`);
-      if (d.firstUserText) process.stderr.write(`  最初の指示: ${d.firstUserText.slice(0, 80).replace(/\n/g, ' ')}\n`);
+    for (const g of groups) {
+      const totalSec = g.entries.reduce((a, s) => a + Math.max(0, ((s.endMs || s.startMs) - s.startMs) / 1000), 0);
+      const sample = g.entries.map((e) => e.title).find((t) => t && t.length > ('Claude Code: ' + g.repo).length + 2);
+      process.stderr.write(`■ ${g.repo}  (${g.entries.length}件 / 計${fmtDur(totalSec)})\n`);
+      if (sample) process.stderr.write(`  例: ${sample.slice(0, 70)}\n`);
       opts.forEach((o, i) => process.stderr.write(`   ${String(i + 1).padStart(2)}) ${o}\n`));
 
       const ans = await ask(rl, '  選択> ');
@@ -81,32 +118,29 @@ async function run() {
       }
       const chosen = opts[idx];
 
-      // ① 以降は自動分類されるよう repoMap に保存
       cfg.repoMap = cfg.repoMap || {};
-      cfg.repoMap[d.dir] = chosen;
+      cfg.repoMap[g.repo] = chosen;
       config.save(cfg);
 
-      // ② 既存タイムラインのカテゴリを更新（同 sessionId で再 upsert）
       let updated = 0;
-      for (const s of sessions) {
+      for (const s of g.entries) {
         try {
           await client.postManualUpdate(cfg, {
             newStartMs: s.startMs,
-            newEndMs: s.endMs,
+            newEndMs: Math.max(s.endMs || s.startMs, s.startMs + 1000),
             title: s.title,
             categoryPath: chosen,
             sessionId: s.sessionId,
-            memo: `claude-code (recategorized)`,
+            memo: 'claude-code (recategorized)',
           });
           updated++;
         } catch (e) {
           process.stderr.write(`    ! 更新失敗 ${s.sessionId}: ${e && e.message || e}\n`);
         }
       }
-      // ③ 進行中セッションの state も更新
-      patchStates(d.dir, chosen);
-      pending.removeDir(d.dir);
-      process.stderr.write(`  → ${chosen} に設定（既存${updated}件更新・以降自動）\n\n`);
+      patchStates(g.repo, chosen);
+      pending.removeDir(g.repo);
+      process.stderr.write(`  → ${chosen} に設定（${updated}件更新・以降自動）\n\n`);
     }
   } finally {
     rl.close();
