@@ -93,6 +93,15 @@ async function main() {
       return;
     }
 
+    case 'ui': {
+      // ローカル Web UI：repoMap の編集 + 未分類セッションの解消。
+      const pi = rest.indexOf('--port');
+      const port = pi >= 0 && rest[pi + 1] ? Number(rest[pi + 1]) : undefined;
+      const noOpen = rest.includes('--no-open');
+      require('../src/ui').start({ port, noOpen });
+      return; // 常駐
+    }
+
     case 'classify': {
       // デバッグ用：cwd を分類して結果を表示（書き込みなし）。
       const { classify } = require('../src/categorize');
@@ -157,6 +166,7 @@ async function main() {
         '  mcp             MCP stdio サーバ\n' +
         '  status          状態表示\n' +
         '  categorize      未分類セッションを対話でカテゴリ指定\n' +
+        '  ui [--port N]   ブラウザUIで紐づけ表を編集・未分類を解消\n' +
         '  sync-categories 実カテゴリ階層を再取得\n' +
         '  classify [cwd]  cwd の分類結果を表示（デバッグ）\n' +
         '  on | off        自動反映の ON/OFF\n' +

@@ -73,6 +73,36 @@ async function collectGroups(cfg) {
   return [...groups.values()].map((g) => ({ repo: g.repo, entries: [...g.entries.values()] }));
 }
 
+// リポジトリ1グループに categoryPath を適用：
+// ①config.repoMap に保存（以降自動） ②既存タイムラインを更新 ③state を patch ④pending から除去。
+// CLI（run）と UI（ui.js）の双方から使う共通処理。{ updated, failed } を返す。
+async function applyGroup(cfg, repo, entries, categoryPath) {
+  cfg.repoMap = cfg.repoMap || {};
+  cfg.repoMap[repo] = categoryPath;
+  config.save(cfg);
+
+  let updated = 0;
+  const failed = [];
+  for (const s of entries || []) {
+    try {
+      await client.postManualUpdate(cfg, {
+        newStartMs: s.startMs,
+        newEndMs: Math.max(s.endMs || s.startMs, s.startMs + 1000),
+        title: s.title,
+        categoryPath,
+        sessionId: s.sessionId,
+        memo: 'claude-code (recategorized)',
+      });
+      updated++;
+    } catch (e) {
+      failed.push({ sessionId: s.sessionId, error: (e && e.message) || String(e) });
+    }
+  }
+  patchStates(repo, categoryPath);
+  pending.removeDir(repo);
+  return { updated, failed };
+}
+
 async function run() {
   const cfg = config.load();
   if (!cfg.userId) {
@@ -118,28 +148,8 @@ async function run() {
       }
       const chosen = opts[idx];
 
-      cfg.repoMap = cfg.repoMap || {};
-      cfg.repoMap[g.repo] = chosen;
-      config.save(cfg);
-
-      let updated = 0;
-      for (const s of g.entries) {
-        try {
-          await client.postManualUpdate(cfg, {
-            newStartMs: s.startMs,
-            newEndMs: Math.max(s.endMs || s.startMs, s.startMs + 1000),
-            title: s.title,
-            categoryPath: chosen,
-            sessionId: s.sessionId,
-            memo: 'claude-code (recategorized)',
-          });
-          updated++;
-        } catch (e) {
-          process.stderr.write(`    ! 更新失敗 ${s.sessionId}: ${e && e.message || e}\n`);
-        }
-      }
-      patchStates(g.repo, chosen);
-      pending.removeDir(g.repo);
+      const { updated, failed } = await applyGroup(cfg, g.repo, g.entries, chosen);
+      for (const f of failed) process.stderr.write(`    ! 更新失敗 ${f.sessionId}: ${f.error}\n`);
       process.stderr.write(`  → ${chosen} に設定（${updated}件更新・以降自動）\n\n`);
     }
   } finally {
@@ -148,4 +158,4 @@ async function run() {
   return 0;
 }
 
-module.exports = { run };
+module.exports = { run, collectGroups, applyGroup, patchStates, repoFromTitle };
