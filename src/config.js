@@ -64,6 +64,10 @@ function rawDefaults() {
     fallbackCategory: '(uncat)',
     anthropicApiKey: null,
     titleMaxLen: 60,
+    // memo に残す詳細: 'none'（従来どおりIDのみ）| 'instructions'（指示の箇条書き）| 'summary'（LLM要約）。
+    // 指示テキストの抜粋を送信するため opt-in（README の送信ポリシー参照）。
+    detail: 'none',
+    detailMaxLen: 1000,
     llm: { model: 'claude-haiku-4-5-20251001' },
   };
 }
@@ -110,6 +114,8 @@ function save(cfg) {
     fallbackCategory: cfg.fallbackCategory || '(uncat)',
     anthropicApiKey: cfg.anthropicApiKey || null,
     titleMaxLen: cfg.titleMaxLen || 60,
+    detail: cfg.detail || 'none',
+    detailMaxLen: cfg.detailMaxLen || 1000,
     llm: cfg.llm || { model: 'claude-haiku-4-5-20251001' },
   };
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(raw, null, 2) + '\n', { mode: 0o600 });

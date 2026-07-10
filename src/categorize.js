@@ -119,6 +119,28 @@ async function summarizeTitleLLM(text, apiKey, cfg) {
   return (j.content && j.content[0] && j.content[0].text || '').trim();
 }
 
+// ブロック中の指示一覧を memo 向けの短い要約にする（detail:"summary" 用）。
+// APIキーが無ければ null（→ 呼び出し側で箇条書きにフォールバック）。
+async function summarizeInstructionsLLM(instructions, cfg) {
+  const apiKey = (cfg && cfg.anthropicApiKey) || process.env.ANTHROPIC_API_KEY;
+  if (!apiKey || !instructions || !instructions.length) return null;
+  const model = (cfg && cfg.llm && cfg.llm.model) || 'claude-haiku-4-5-20251001';
+  const prompt =
+    `次の開発作業の指示一覧を、時間記録のメモとして要約してください。` +
+    `日本語・箇条書き2〜4行・各行は体言止め・挨拶や記号や絵文字は除く。説明不要。\n\n指示一覧:\n` +
+    instructions.slice(0, 30).map((s) => `- ${String(s).slice(0, 200)}`).join('\n');
+  const signal = AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined;
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+    body: JSON.stringify({ model, max_tokens: 256, messages: [{ role: 'user', content: prompt }] }),
+    signal,
+  });
+  const j = await res.json().catch(() => ({}));
+  const text = (j.content && j.content[0] && j.content[0].text || '').trim();
+  return text || null;
+}
+
 // メイン：静的マップ→（未知なら）LLM→フォールバック の順で categoryPath を決める。
 async function classify(ctx, cfg) {
   const base = `Claude Code: ${repoName(ctx.cwd)}`;
@@ -134,4 +156,4 @@ async function classify(ctx, cfg) {
   return { categoryPath: (cfg && cfg.fallbackCategory) || '(uncat)', title, by: 'fallback' };
 }
 
-module.exports = { classify, staticMatch, repoName, REPO_RULES };
+module.exports = { classify, staticMatch, repoName, summarizeInstructionsLLM, REPO_RULES };

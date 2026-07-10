@@ -6,8 +6,8 @@ const config = require('./config');
 const auth = require('./auth');
 const client = require('./client');
 const pending = require('./pending');
-const { ulid, startOffset, firstUserTimestampMs, firstUserText, gitRoot, localDayStartMs, dayKey } = require('./util');
-const { classify } = require('./categorize');
+const { ulid, startOffset, firstUserTimestampMs, firstUserText, userTextsSince, gitRoot, localDayStartMs, dayKey } = require('./util');
+const { classify, summarizeInstructionsLLM } = require('./categorize');
 
 function readStdin() {
   return new Promise((resolve) => {
@@ -82,10 +82,15 @@ async function run(opts) {
         cwd,
         categoryPath: decided.categoryPath,
         title: decided.title,
+        instructions: transcriptPath ? userTextsSince(transcriptPath, sinceMs) : [],
       };
     } else {
+      // 前回 Stop 以降に増えたユーザー指示をブロックへ累積（detail memo 用）。
+      if (transcriptPath) appendInstructions(st, userTextsSince(transcriptPath, st.lastSeenMs + 1));
       st.lastSeenMs = now;
     }
+
+    const memo = await buildMemo(cfg, st, claudeSessionId, dryRun);
     saveState(claudeSessionId, st);
 
     const categoryPath = st.categoryPath;
@@ -103,7 +108,7 @@ async function run(opts) {
       title,
       categoryPath,
       sessionId: st.sessionId,
-      memo: `claude-code session ${claudeSessionId}`,
+      memo,
     };
 
     // uncat なら、後で `tokiori-cc categorize` で聞けるよう保留キューに記録（フックは非対話）。
@@ -126,6 +131,7 @@ async function run(opts) {
       return finish(false, { skipped: 'no_user' });
     }
     await client.postManualUpdate(cfg, payload);
+    if (!st.posted) { st.posted = true; saveState(claudeSessionId, st); }
     return finish(false, { posted: true });
   } catch (e) {
     config.logError(`hook: ${e && e.stack ? e.stack : e}`);
@@ -133,6 +139,75 @@ async function run(opts) {
     if (opts.dryRun) process.stdout.write(JSON.stringify({ error: String(e && e.message || e) }, null, 2) + '\n');
     return 0;
   }
+}
+
+// tokiori-cc が書いた memo の目印。この接頭辞が無い memo は手編集とみなし保持する。
+const MEMO_MARK = 'claude-code';
+const MAX_INSTRUCTIONS = 50;
+
+function appendInstructions(st, texts) {
+  if (!texts || !texts.length) return;
+  st.instructions = st.instructions || [];
+  for (const t of texts) {
+    if (st.instructions.length >= MAX_INSTRUCTIONS) break;
+    if (st.instructions[st.instructions.length - 1] === t) continue;
+    st.instructions.push(t);
+  }
+}
+
+// タイムライン上の現在の memo（同一ブロックのもの）。読めなければ null。
+async function remoteMemo(cfg, st) {
+  try {
+    const logs = await client.listManualLogs(cfg, Math.max(0, st.startMs - 1000), { limit: 100, maxPages: 2 });
+    const it = logs.find((l) => l.sessionId === st.sessionId);
+    return it ? (it.memo || '') : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function bulletsBody(st, cfg) {
+  const max = cfg.detailMaxLen > 0 ? cfg.detailMaxLen : 1000;
+  let body = (st.instructions || []).map((s) => `・${s}`).join('\n');
+  if (body.length > max) body = body.slice(0, max) + '…';
+  return body;
+}
+
+// memo を組み立てる。detail 無効なら従来どおり session ID のみ。
+// 有効時は「ID 行 + 指示の箇条書き（または LLM 要約）」。
+// ダッシュボードで memo が手編集されていたら以降は上書きせずそのまま維持する。
+async function buildMemo(cfg, st, claudeSessionId, dryRun) {
+  const head = `claude-code session ${claudeSessionId}`;
+  const mode = cfg.detail;
+  if (mode !== 'instructions' && mode !== 'summary') return head;
+
+  if (!dryRun && st.posted) {
+    const remote = await remoteMemo(cfg, st);
+    if (remote != null && remote !== '' && !remote.startsWith(MEMO_MARK)) {
+      st.userMemo = remote;
+      st.memoLocked = true;
+    }
+  }
+  if (st.memoLocked) return st.userMemo || head;
+
+  if (mode === 'summary') {
+    const n = (st.instructions || []).length;
+    if (n && st.summaryFor !== n) {
+      try {
+        const s = await summarizeInstructionsLLM(st.instructions, cfg);
+        if (s) { st.summary = s; st.summaryFor = n; }
+      } catch (_) { /* 前回要約 or 箇条書きへフォールバック */ }
+    }
+    if (st.summary) {
+      const max = cfg.detailMaxLen > 0 ? cfg.detailMaxLen : 1000;
+      let body = st.summary;
+      if (body.length > max) body = body.slice(0, max) + '…';
+      return `${head}\n${body}`;
+    }
+  }
+
+  const body = bulletsBody(st, cfg);
+  return body ? `${head}\n${body}` : head;
 }
 
 function finish(dryRun, info) {

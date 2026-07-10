@@ -170,4 +170,39 @@ function firstUserText(transcriptPath, sinceMs) {
   return '';
 }
 
-module.exports = { ulid, startOffset, decodeJwt, firstUserTimestampMs, hasMutatingToolUse, firstUserText, cleanUserText, gitRoot, localDayStartMs, dayKey };
+// transcript から sinceMs 以降のユーザー発話テキストを時系列で列挙（detail memo 用）。
+// tool_result のみのメッセージは firstUserText 同様に除外。連続する同一発話はまとめる。
+function userTextsSince(transcriptPath, sinceMs, opts) {
+  opts = opts || {};
+  const since = Number.isFinite(sinceMs) ? sinceMs : -Infinity;
+  const maxEach = opts.maxEach || 120;   // 1指示あたりの最大長
+  const maxCount = opts.maxCount || 50;  // 収集する最大件数
+  const out = [];
+  try {
+    const raw = fs.readFileSync(transcriptPath, 'utf8');
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      let obj;
+      try { obj = JSON.parse(line); } catch (_) { continue; }
+      if (!obj || obj.type !== 'user' || obj.isMeta) continue;
+      const ms = obj.timestamp ? Date.parse(obj.timestamp) : NaN;
+      if (Number.isFinite(ms) && ms < since) continue;
+      const c = obj.message && obj.message.content;
+      let text = '';
+      if (typeof c === 'string') text = c;
+      else if (Array.isArray(c)) {
+        const t = c.find((x) => x && x.type === 'text');
+        if (t && typeof t.text === 'string') text = t.text;
+      }
+      let cleaned = cleanUserText(text);
+      if (!cleaned) continue;
+      if (cleaned.length > maxEach) cleaned = cleaned.slice(0, maxEach) + '…';
+      if (out.length && out[out.length - 1] === cleaned) continue;
+      out.push(cleaned);
+      if (out.length >= maxCount) break;
+    }
+  } catch (_) { /* noop */ }
+  return out;
+}
+
+module.exports = { ulid, startOffset, decodeJwt, firstUserTimestampMs, hasMutatingToolUse, firstUserText, userTextsSince, cleanUserText, gitRoot, localDayStartMs, dayKey };

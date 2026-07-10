@@ -1,6 +1,6 @@
 {
   "name": "tokiori-cc",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Reflect your Claude Code work sessions into the tokiori timeline, with automatic category detection. Sends only category, title and timestamps — never your code.",
   "type": "commonjs",
   "bin": {

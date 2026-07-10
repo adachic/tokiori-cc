@@ -13,10 +13,13 @@ This tool is open source precisely so you can verify this yourself. It sends onl
 - Category (auto-detected from the project you're working in)
 - Title (a one-line summary of your first instruction)
 
+**Sent only if you opt in** (`detail` in `~/.tokiori/config.json`, off by default)
+- Short excerpts of your instructions to Claude (or an LLM summary of them), stored in the session memo — see [Session detail](#session-detail-optional)
+
 **Never sent**
 - Your source code or file contents
 - Keystrokes or terminal output
-- Your conversations with Claude
+- Claude's replies, tool output, or anything else from the conversation
 
 The exact payload is built in [`src/hook.js`](src/hook.js) (`postManualUpdate`) and the category/title logic in [`src/categorize.js`](src/categorize.js). Read them — that's all that leaves your machine.
 
@@ -57,6 +60,22 @@ One Claude Code session becomes one timeline block that grows as you work (no du
 | `tokiori-cc categorize` | Interactively categorize unknown projects (then automatic) |
 | `tokiori-cc on` / `off` | Enable / disable auto-recording |
 | `tokiori-cc doctor` | Re-check the hook registration |
+
+## Session detail (optional)
+
+By default the timeline block carries only the title. If you want to see *what* you asked for in each block, set `detail` in `~/.tokiori/config.json`:
+
+```json
+{ "detail": "instructions" }
+```
+
+- `"none"` (default) — memo holds only the session ID, nothing from the conversation is sent
+- `"instructions"` — the memo accumulates a bullet list of your instructions in that block (each truncated to 120 chars, total capped by `detailMaxLen`, default 1000)
+- `"summary"` — like `instructions`, but condensed into a few lines by an LLM (requires `anthropicApiKey`; falls back to the bullet list without one)
+
+Notes:
+- This sends short excerpts of **your instructions only** — never code, file contents, or Claude's replies.
+- If you edit a block's memo by hand in the dashboard, tokiori-cc detects that and stops overwriting it for that block.
 
 ## Category detection
 

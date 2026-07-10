@@ -140,6 +140,7 @@ async function main() {
         accounts,
         trackApi: cfg.endpoints.trackApi,
         minSeconds: cfg.minSeconds,
+        detail: cfg.detail,
         autoUpdate: cfg.autoUpdate,
         uncatPending: pendingCount,
       }, null, 2) + '\n');
