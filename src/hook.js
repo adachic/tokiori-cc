@@ -6,7 +6,7 @@ const config = require('./config');
 const auth = require('./auth');
 const client = require('./client');
 const pending = require('./pending');
-const { ulid, startOffset, firstUserTimestampMs, firstUserText, userTextsSince, gitRoot, localDayStartMs, dayKey } = require('./util');
+const { sessionIdFor, startOffset, gitRoot, readTranscriptEvents, computeBlocks } = require('./util');
 const { classify, summarizeInstructionsLLM } = require('./categorize');
 
 function readStdin() {
@@ -54,57 +54,55 @@ async function run(opts) {
     const claudeSessionId = evt.session_id || evt.sessionId || 'unknown';
     const cwd = evt.cwd || process.cwd();
     const transcriptPath = evt.transcript_path || evt.transcriptPath || null;
-    const now = Date.now();
 
-    // ブロック分割: 日付が変わった or 一定時間アイドルが空いたら新ブロックにする。
-    // これにより各ブロックは1日内に収まり、夜間などの長時間アイドルも繰り越さない。
-    const gapMs = (cfg.gapMinutes > 0 ? cfg.gapMinutes : 0) * 60 * 1000;
-    const todayKey = dayKey(now);
+    // 作業ブロックは「人間が実際にタイプした発話」を基準に transcript から算出する。
+    // Stop 発火時刻(now)や自動注入メッセージでは延長しないため、就寝・離席のような
+    // 閾値超のアイドルは別ブロックに切れ、無人時間が作業に混ざらない（computeBlocks 参照）。
+    const gapMs = (cfg.gapMinutes > 0 ? cfg.gapMinutes : 30) * 60 * 1000;
+    const events = transcriptPath ? readTranscriptEvents(transcriptPath) : [];
+    const blocks = computeBlocks(events, gapMs);
+    if (!blocks.length) return finish(dryRun, { skipped: 'no_human_activity' });
+    const block = blocks[blocks.length - 1]; // 直近（進行中）の人間発話ブロック
+
+    // 同一ブロックでは sessionId/startMs を保って冪等に upsert する（state に保存）。
     let st = loadState(claudeSessionId);
-    const dayChanged = st && st.day && st.day !== todayKey;
-    const gapExceeded = st && gapMs > 0 && st.lastSeenMs && (now - st.lastSeenMs) > gapMs;
-
-    if (!st || !st.categoryPath || !st.day || dayChanged || gapExceeded) {
-      // 新ブロックの開始 = 「本日0:00」かつ「前回終了後」以降の最初の発話（無ければ now）。
-      const sinceMs = Math.max(localDayStartMs(now), (st && st.lastSeenMs) ? st.lastSeenMs + 1 : 0);
-      let blockStart = (transcriptPath && firstUserTimestampMs(transcriptPath, sinceMs));
-      if (!Number.isFinite(blockStart) || blockStart < sinceMs || blockStart > now) blockStart = now;
-      const sessionId = ulid(blockStart);
-      const startMs = blockStart + startOffset(sessionId);
-      const ctx = { cwd, firstUserText: transcriptPath ? firstUserText(transcriptPath, sinceMs) : '' };
-      const decided = await classify(ctx, cfg);
+    const sameBlock = st && st.blockStartMs === block.startMs && st.categoryPath;
+    if (!sameBlock) {
+      // 新しいブロック → 分類し直し、memo/summary/posted をリセット。
+      const decided = await classify({ cwd, firstUserText: block.firstText }, cfg);
+      // sessionId はブロックから決定的に生成（backfill と一致 → 移行時も重複しない）。
+      const sid = sessionIdFor(`${claudeSessionId}:${block.startMs}`, block.startMs);
       st = {
-        day: todayKey,
-        sessionId,
-        startMs,
-        lastSeenMs: now,
         claudeSessionId,
+        blockStartMs: block.startMs,
+        sessionId: sid,
+        startMs: block.startMs + startOffset(sid),
         cwd,
         categoryPath: decided.categoryPath,
         title: decided.title,
-        instructions: transcriptPath ? userTextsSince(transcriptPath, sinceMs) : [],
+        posted: false,
       };
-    } else {
-      // 前回 Stop 以降に増えたユーザー指示をブロックへ累積（detail memo 用）。
-      if (transcriptPath) appendInstructions(st, userTextsSince(transcriptPath, st.lastSeenMs + 1));
-      st.lastSeenMs = now;
     }
+    st.cwd = cwd;
+    st.instructions = block.prompts; // detail memo 用（transcript から都度取得・状態に溜めない）
 
     const memo = await buildMemo(cfg, st, claudeSessionId, dryRun);
-    saveState(claudeSessionId, st);
 
+    const startMs = st.startMs;
+    const endMs = Math.max(block.endMs, startMs + 1000);
     const categoryPath = st.categoryPath;
     const title = st.title;
 
-    // 短すぎセッションのスキップ（Phase 1 既定 0 = 無効）。
-    const elapsedSec = Math.max(0, Math.floor((now - st.startMs) / 1000));
+    // 短すぎブロックのスキップ（既定 0 = 無効）。
+    const elapsedSec = Math.max(0, Math.floor((endMs - startMs) / 1000));
     if (cfg.minSeconds > 0 && elapsedSec < cfg.minSeconds) {
+      saveState(claudeSessionId, st);
       return finish(dryRun, { skipped: 'too_short', elapsedSec });
     }
 
     const payload = {
-      newStartMs: st.startMs,
-      newEndMs: Math.max(now, st.startMs + 1000),
+      newStartMs: startMs,
+      newEndMs: endMs,
       title,
       categoryPath,
       sessionId: st.sessionId,
@@ -117,21 +115,31 @@ async function run(opts) {
       pending.record({
         dir: path.basename(root),
         cwd,
-        firstUserText: transcriptPath ? firstUserText(transcriptPath) : '',
-        session: { sessionId: st.sessionId, startMs: st.startMs, endMs: now, title },
+        firstUserText: block.firstText,
+        session: { sessionId: st.sessionId, startMs, endMs, title },
       });
     }
 
     if (dryRun) {
-      return finish(true, { wouldPost: true, userId: cfg.userId, payload, by: st.categoryPath });
+      return finish(true, { wouldPost: true, userId: cfg.userId, blocks: blocks.length, payload, by: categoryPath });
     }
 
     if (!cfg.userId) {
       config.logError('userId 未設定（login 未完了）');
+      saveState(claudeSessionId, st);
       return finish(false, { skipped: 'no_user' });
     }
+
+    // 変化が無ければ再送しない（自動 Stop の連発で無駄打ちしない）。
+    if (st.posted && st.postedEndMs === endMs) {
+      saveState(claudeSessionId, st);
+      return finish(false, { skipped: 'unchanged' });
+    }
+
     await client.postManualUpdate(cfg, payload);
-    if (!st.posted) { st.posted = true; saveState(claudeSessionId, st); }
+    st.posted = true;
+    st.postedEndMs = endMs;
+    saveState(claudeSessionId, st);
     return finish(false, { posted: true });
   } catch (e) {
     config.logError(`hook: ${e && e.stack ? e.stack : e}`);
@@ -143,17 +151,6 @@ async function run(opts) {
 
 // tokiori-cc が書いた memo の目印。この接頭辞が無い memo は手編集とみなし保持する。
 const MEMO_MARK = 'claude-code';
-const MAX_INSTRUCTIONS = 50;
-
-function appendInstructions(st, texts) {
-  if (!texts || !texts.length) return;
-  st.instructions = st.instructions || [];
-  for (const t of texts) {
-    if (st.instructions.length >= MAX_INSTRUCTIONS) break;
-    if (st.instructions[st.instructions.length - 1] === t) continue;
-    st.instructions.push(t);
-  }
-}
 
 // タイムライン上の現在の memo（同一ブロックのもの）。読めなければ null。
 async function remoteMemo(cfg, st) {

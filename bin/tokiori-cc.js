@@ -93,6 +93,25 @@ async function main() {
       return;
     }
 
+    case 'backfill': {
+      // 過去の肥大ブロック（就寝・離席込み）を新ロジックで作り直す。既定 dry-run。
+      const apply = rest.includes('--apply');
+      const showNoTranscript = rest.includes('--show-missing');
+      const si = rest.indexOf('--since');
+      let sinceMs = 0;
+      if (si >= 0 && rest[si + 1]) {
+        const ms = Date.parse(rest[si + 1]);
+        if (Number.isFinite(ms)) sinceMs = ms;
+      }
+      const ri = rest.indexOf('--min-reduce');
+      const minReduceMin = ri >= 0 && rest[ri + 1] ? Number(rest[ri + 1]) : undefined;
+      const force = rest.includes('--force');
+      const rh = rest.indexOf('--recent-hours');
+      const recentHours = rh >= 0 && rest[rh + 1] ? Number(rest[rh + 1]) : undefined;
+      process.exitCode = await require('../src/backfill').run({ apply, sinceMs, minReduceMin, showNoTranscript, force, recentHours });
+      return;
+    }
+
     case 'ui': {
       // ローカル Web UI：repoMap の編集 + 未分類セッションの解消。
       const pi = rest.indexOf('--port');
@@ -167,6 +186,7 @@ async function main() {
         '  mcp             MCP stdio サーバ\n' +
         '  status          状態表示\n' +
         '  categorize      未分類セッションを対話でカテゴリ指定\n' +
+        '  backfill [--apply] [--since YYYY-MM-DD]  過去の肥大ブロックを新ロジックで補正（既定dry-run）\n' +
         '  ui [--port N]   ブラウザUIで紐づけ表を編集・未分類を解消\n' +
         '  sync-categories 実カテゴリ階層を再取得\n' +
         '  classify [cwd]  cwd の分類結果を表示（デバッグ）\n' +
