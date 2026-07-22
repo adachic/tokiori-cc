@@ -311,8 +311,12 @@ async function run(rest) {
   log(`✓ 収集 ${range.from}..${range.to}: ${summary}`);
 
   if (dryRun) {
-    for (const it of items) {
-      process.stdout.write(`${it.date} [${it.source}/${it.kind}] ${it.title}${it.repo ? ` (${it.repo})` : ''}\n`);
+    if (rest.includes('--json')) {
+      process.stdout.write(JSON.stringify(items, null, 2) + '\n');
+    } else {
+      for (const it of items) {
+        process.stdout.write(`${it.date} [${it.source}/${it.kind}] ${it.title}${it.repo ? ` (${it.repo})` : ''}\n`);
+      }
     }
     log('(dry-run: push しませんでした)');
     return 0;
