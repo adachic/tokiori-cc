@@ -112,6 +112,12 @@ async function main() {
       return;
     }
 
+    case 'worklog': {
+      // 日別の成果アイテム（GitHub活動 + Claude Codeセッション）を収集して push。
+      process.exitCode = await require('../src/worklog').run(rest);
+      return;
+    }
+
     case 'ui': {
       // ローカル Web UI：repoMap の編集 + 未分類セッションの解消。
       const pi = rest.indexOf('--port');
@@ -187,6 +193,8 @@ async function main() {
         '  status          状態表示\n' +
         '  categorize      未分類セッションを対話でカテゴリ指定\n' +
         '  backfill [--apply] [--since YYYY-MM-DD]  過去の肥大ブロックを新ロジックで補正（既定dry-run）\n' +
+        '  worklog [--date YYYY-MM-DD | --days N | --from A --to B] [--dry-run] [--env dev|prod]\n' +
+        '                  日別の成果アイテム（GitHub活動+Claudeセッション）を収集してpush\n' +
         '  ui [--port N]   ブラウザUIで紐づけ表を編集・未分類を解消\n' +
         '  sync-categories 実カテゴリ階層を再取得\n' +
         '  classify [cwd]  cwd の分類結果を表示（デバッグ）\n' +
