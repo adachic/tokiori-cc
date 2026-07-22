@@ -19,6 +19,7 @@ const { execFileSync } = require('child_process');
 
 const config = require('./config');
 const auth = require('./auth');
+const { staticMatch } = require('./categorize');
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const GH_LIMIT = 100;
@@ -64,6 +65,18 @@ function inRange(dateStr, range) {
   return dateStr >= range.from && dateStr <= range.to;
 }
 
+/* ---------------- category ---------------- */
+
+// GitHub の owner/name を staticMatch が食えるパス風文字列に変換して分類する。
+// 例 'PIVOT-media/pivot-web' → parts [pivot, media, pivot, web] → 仕事/pivot。
+// 当たらないリポジトリは config.repoMap にディレクトリ名/トークンを足せば拾える。
+function categoryForRepo(repo, cfg) {
+  if (!repo) return null;
+  const parts = String(repo).split(/[\/_-]+/);
+  const all = [...parts, ...parts.map((p) => p.toLowerCase())];
+  return staticMatch(all.join(path.sep), cfg);
+}
+
 /* ---------------- GitHub (gh CLI) ---------------- */
 
 function gh(args, opts) {
@@ -86,7 +99,7 @@ function ghAvailable() {
 
 const SEARCH_FIELDS = 'number,title,repository,url,createdAt,closedAt,updatedAt,author';
 
-function collectGithub(range, log) {
+function collectGithub(range, cfg, log) {
   if (!ghAvailable()) {
     log('(GitHub スキップ: gh が無いか未ログイン)');
     return [];
@@ -100,6 +113,8 @@ function collectGithub(range, log) {
     if (!inRange(item.date, range)) return;
     if (seen.has(item.itemKey)) return;
     seen.add(item.itemKey);
+    const cat = categoryForRepo(item.repo, cfg);
+    if (cat) item.categoryPath = cat;
     items.push(item);
   };
   const repoName = (r) => (r && (r.nameWithOwner || r.name)) || '';
@@ -216,7 +231,7 @@ function extractSessionMeta(file) {
   return { title: '', cwd };
 }
 
-function collectClaude(range, log) {
+function collectClaude(range, cfg, log) {
   const root = path.join(os.homedir(), '.claude', 'projects');
   let projectDirs = [];
   try {
@@ -242,12 +257,15 @@ function collectClaude(range, log) {
       const meta = extractSessionMeta(file);
       if (!meta.title) continue;
       const project = meta.cwd ? path.basename(meta.cwd) : path.basename(dir).split('-').pop();
-      items.push({
+      const item = {
         date, ts: st.mtime.getTime(),
         itemKey: `cc-session:${path.basename(name, '.jsonl')}`,
         source: 'claude-code', kind: 'session',
         title: meta.title, repo: project, device,
-      });
+      };
+      const cat = staticMatch(meta.cwd, cfg) || categoryForRepo(project, cfg);
+      if (cat) item.categoryPath = cat;
+      items.push(item);
     }
   }
   return items;
@@ -300,9 +318,13 @@ async function run(rest) {
   let range;
   try { range = parseRange(rest); } catch (e) { log(`✗ ${e.message}`); return 1; }
 
+  // cfg は push 先の解決だけでなくカテゴリ分類（repoMap）にも使う
+  let cfg;
+  try { cfg = loadCfg(envOverride); } catch (e) { log(`✗ ${e.message}`); return 1; }
+
   const items = [];
-  if (!noGithub) items.push(...collectGithub(range, log));
-  if (!noClaude) items.push(...collectClaude(range, log));
+  if (!noGithub) items.push(...collectGithub(range, cfg, log));
+  if (!noClaude) items.push(...collectClaude(range, cfg, log));
   items.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.ts || 0) - (b.ts || 0)));
 
   const bySource = {};
@@ -315,7 +337,8 @@ async function run(rest) {
       process.stdout.write(JSON.stringify(items, null, 2) + '\n');
     } else {
       for (const it of items) {
-        process.stdout.write(`${it.date} [${it.source}/${it.kind}] ${it.title}${it.repo ? ` (${it.repo})` : ''}\n`);
+        const cat = it.categoryPath ? ` #${it.categoryPath}` : '';
+        process.stdout.write(`${it.date} [${it.source}/${it.kind}] ${it.title}${it.repo ? ` (${it.repo})` : ''}${cat}\n`);
       }
     }
     log('(dry-run: push しませんでした)');
@@ -324,7 +347,6 @@ async function run(rest) {
 
   if (items.length === 0) { log('push するアイテムがありません'); return 0; }
 
-  const cfg = loadCfg(envOverride);
   if (!cfg.userId || !cfg.auth.refreshToken) {
     log(`✗ [${cfg.env}] は未ログインです。\`tokiori-cc login --env ${cfg.env}\` を実行してください`);
     return 1;
