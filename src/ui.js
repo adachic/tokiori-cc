@@ -5,6 +5,10 @@
 // ・タイムライン上の未分類(uncat)セッションをカテゴリ指定で一括解消
 // CLI の `tokiori-cc categorize` と同じ適用ロジック（cmd_categorize.applyGroup）を共有する。
 // 127.0.0.1 のみにバインドし、外部からは触れない。
+// さらにブラウザ経由の攻撃に備えて（SEC-7）:
+// ・Host ヘッダを 127.0.0.1/localhost:<port> に限定 → DNS リバインディングで /api/state を読まれない
+// ・/api/* は Origin（あれば）を自 UI のオリジンに限定、Sec-Fetch-Site: cross-site を拒否
+// ・状態変更 (POST) は Origin 必須＋Content-Type: application/json 必須 → CSRF（simple request）を拒否
 
 const http = require('http');
 const { spawn } = require('child_process');
@@ -26,7 +30,7 @@ function openBrowser(url) {
 
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.writeHead(status, { ...SECURITY_HEADERS, 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(body);
 }
 
@@ -38,6 +42,41 @@ function readBody(req) {
     req.on('error', () => resolve({}));
   });
 }
+
+function allowedHosts(port) {
+  return new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
+}
+
+// DNS リバインディング対策: Host が自分自身でなければ拒否。
+function isAllowedHost(req, port) {
+  const host = String(req.headers.host || '').toLowerCase();
+  return allowedHosts(port).has(host);
+}
+
+// CSRF 対策: /api/* へのリクエストが自 UI ページ由来かを判定。
+// 戻り値: null なら OK、文字列なら拒否理由。
+function checkApiOrigin(req, port) {
+  const origin = req.headers.origin;
+  const allowedOrigins = new Set([...allowedHosts(port)].map((h) => `http://${h}`));
+  if (origin !== undefined && !allowedOrigins.has(String(origin).toLowerCase())) return 'origin not allowed';
+  const site = req.headers['sec-fetch-site'];
+  if (site && site !== 'same-origin' && site !== 'none') return 'cross-site request';
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    // ブラウザは POST の fetch には必ず Origin を付ける。無い＝想定外のクライアントとして拒否。
+    if (origin === undefined) return 'origin required';
+    // application/json はクロスオリジンだとプリフライト必須（simple request にならない）。
+    const ct = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    if (ct !== 'application/json') return 'content-type must be application/json';
+  }
+  return null;
+}
+
+const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'no-referrer',
+  'Cross-Origin-Resource-Policy': 'same-origin',
+};
 
 function fmtDur(sec) {
   const m = Math.round(sec / 60);
@@ -160,15 +199,18 @@ function start(opts) {
   const port = opts.port || DEFAULT_PORT;
   const server = http.createServer(async (req, res) => {
     let url;
+    if (!isAllowedHost(req, port)) return sendJson(res, 403, { error: 'forbidden host' });
     try { url = new URL(req.url, `http://127.0.0.1:${port}`); } catch (_) { return sendJson(res, 400, { error: 'bad url' }); }
     if (url.pathname.startsWith('/api/')) {
+      const denied = checkApiOrigin(req, port);
+      if (denied) return sendJson(res, 403, { error: denied });
       try { return await handleApi(req, res, url); } catch (e) { return sendJson(res, 500, { error: (e && e.message) || String(e) }); }
     }
     if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': "frame-ancestors 'none'" });
       return res.end(PAGE_HTML);
     }
-    res.writeHead(404); res.end('not found');
+    res.writeHead(404, SECURITY_HEADERS); res.end('not found');
   });
 
   server.on('error', (e) => {
@@ -406,4 +448,4 @@ load();
 </script>
 </body></html>`;
 
-module.exports = { start, DEFAULT_PORT };
+module.exports = { start, DEFAULT_PORT, isAllowedHost, checkApiOrigin };
